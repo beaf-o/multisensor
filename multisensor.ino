@@ -323,7 +323,7 @@ void loop() {
 }
 
 void checkMotion() {
-  pirValue = digitalRead(PIRPIN); //read state of the
+  pirValue = digitalRead(PIRPIN);
 
   if (pirValue == LOW && pirStatus != 1) {
     motionStatus = "standby";
