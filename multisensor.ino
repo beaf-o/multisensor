@@ -22,7 +22,7 @@ Timer t;
 
 Adafruit_BMP280 bmp; // I2C
 
-const PROGMEM char* STATE_TOPIC = "home-assistant/sensors/1";
+const PROGMEM char* STATE_TOPIC = "home-assistant/sensors/sensornode1"; // "home-assistant/sensors/1";
 const PROGMEM char* HEALTH_TOPIC = "home-assistant/sensors/1/health";
 const PROGMEM char* IP_TOPIC = "home-assistant/sensors/1/ip";
 
@@ -33,6 +33,7 @@ const String SENSORNAME = "sensornode1";
 #define DHTTYPE   DHT22
 #define LDRPIN    A0
 
+bool initial = true;
 int ldr;
 float diffLdr = 25;
 
@@ -54,8 +55,6 @@ int pirValue;
 int pirStatus;
 String motionStatus;
 
-
-
 char message_buff[100];
 const int BUFFER_SIZE = 300;
 #define MQTT_MAX_PACKET_SIZE 512
@@ -64,7 +63,6 @@ WiFiClient espClient;
 PubSubClient pubSubClient(espClient);
 DHT dht(DHTPIN, DHTTYPE);
 
-/********************************** START SETUP*****************************************/
 void setup() {
   Serial.begin(115200);
   Serial.println("");
@@ -78,21 +76,20 @@ void setup() {
 }
 
 void setupPins() {
+  /*
   Wire.begin(D3,D4); 
   if (!bmp.begin()) {  
     Serial.println("Could not find a valid BMP280 sensor, check wiring!");
     while (1);
   }
+  */
 
   pinMode(PIRPIN, INPUT);
   pinMode(DHTPIN, INPUT);
-  pinMode(LDRPIN, INPUT);
-
-  delay(10);
+  //pinMode(LDRPIN, INPUT);
 }
 
 void setupWifi() {
-  delay(10);
   WiFiManager wifiManager;
   wifiManager.setTimeout(180);
 
@@ -320,6 +317,11 @@ void loop() {
   reconnect();
   ArduinoOTA.handle();
   t.update();
+  
+  if (initial == true) {
+    publishIp();
+    initial = false;  
+  }
 }
 
 void checkMotion() {
@@ -338,18 +340,8 @@ void checkMotion() {
 
 void checkSensors() {
   bool hasChanges = false;
-  
-  float temperatureBMPNew = bmp.readTemperature();
-  if (checkBoundSensor(temperatureBMPNew, temperatureBMP, diffTemperature)) {
-    temperatureBMP = temperatureBMPNew;
-    hasChanges = true;
-  }
 
-  float temperatureDHTNew = dht.readTemperature(); //to use celsius remove the true text inside the parentheses  
-  if (checkBoundSensor(temperatureDHTNew, temperatureDHT, diffTemperature)) {
-    temperatureDHT = temperatureDHTNew;
-    hasChanges = true;
-  }
+  /*
 
   float pressureNew = bmp.readPressure();
   if (checkBoundSensor(pressureNew, pressure, diffPressure)) {
@@ -362,6 +354,19 @@ void checkSensors() {
     altitude = altitudeNew;
     hasChanges = true;
   }
+  
+  float temperatureBMPNew = bmp.readTemperature();
+  if (checkBoundSensor(temperatureBMPNew, temperatureBMP, diffTemperature)) {
+    temperatureBMP = temperatureBMPNew;
+    hasChanges = true;
+  }
+  */
+
+  float temperatureDHTNew = dht.readTemperature(); //to use celsius remove the true text inside the parentheses  
+  if (checkBoundSensor(temperatureDHTNew, temperatureDHT, diffTemperature)) {
+    temperatureDHT = temperatureDHTNew;
+    hasChanges = true;
+  }
 
   float humidityNew = dht.readHumidity();
   if (checkBoundSensor(humidityNew, humidity, diffHumidity)) {
@@ -369,11 +374,13 @@ void checkSensors() {
     hasChanges = true;
   }
 
+/*
   int ldrNew = analogRead(LDRPIN);
   if (checkBoundSensor(ldrNew, ldr, diffLdr)) {
     ldr = ldrNew;
     hasChanges = true;
   }
+  */
 
   if (hasChanges == true) {
     sendState();
@@ -384,7 +391,7 @@ String ipAddress2String(const IPAddress& ipAddress){
   return String(ipAddress[0]) + String(".") +\
     String(ipAddress[1]) + String(".") +\
     String(ipAddress[2]) + String(".") +\
-    String(ipAddress[3]); 
+    String(ipAddress[3]);
 }
 
 void publishIp() {
