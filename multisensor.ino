@@ -22,11 +22,11 @@ Timer t;
 
 Adafruit_BMP280 bmp; // I2C
 
-const PROGMEM char* STATE_TOPIC = "home-assistant/sensors/sensornode1"; // "home-assistant/sensors/1";
+const String SENSORNAME = "sensor-1000";
+const PROGMEM char* IP_TOPIC =     "home-assistant/sensors/1/ip";
+const PROGMEM char* LOGS_TOPIC =   "home-assistant/sensors/1/logs";
+const PROGMEM char* STATE_TOPIC =  "home-assistant/sensors/1/state";
 const PROGMEM char* HEALTH_TOPIC = "home-assistant/sensors/1/health";
-const PROGMEM char* IP_TOPIC = "home-assistant/sensors/1/ip";
-
-const String SENSORNAME = "sensornode1";
 
 #define PIRPIN    D2
 #define DHTPIN    D7
@@ -93,6 +93,8 @@ void setupWifi() {
   WiFiManager wifiManager;
   wifiManager.setTimeout(180);
 
+  //resetToFactoryDefaults();
+
   if (!wifiManager.autoConnect(SENSORNAME.c_str(), DEFAULT_PW)) {
     Serial.println("Failed to connect and hit timeout");
     delay(3000);
@@ -138,41 +140,25 @@ void setupMqtt() {
 void setupTimer() {
   t.every(100, checkMotion);
   t.every(10000, checkSensors);
-  t.every(600000, sendState);
+  t.every(60000, sendLog); // every 1 minute
+  t.every(600000, sendState); // every 1 minute
   t.every(10000, sendAlive); // every 10 seconds
-  t.every(660000, publishIp); // every 11 minutes
+  t.every(120000, publishIp); // every 2 minutes
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-
-  char message[length + 1];
-  for (int i = 0; i < length; i++) {
-    message[i] = (char)payload[i];
-  }
-  message[length] = '\0';
-  Serial.println(message);
-
-  if (!processJson(message)) {
-    return;
+void callback(char* p_topic, byte* p_payload, unsigned int p_length) {
+  // concat the payload into a string
+  String payload;
+  for (uint8_t i = 0; i < p_length; i++) {
+    payload.concat((char)p_payload[i]);
   }
 
-  sendState();
-}
-
-bool processJson(char* message) {
-  StaticJsonBuffer<BUFFER_SIZE> jsonBuffer;
-
-  JsonObject& root = jsonBuffer.parseObject(message);
-
-  if (!root.success()) {
-    Serial.println("parseObject() failed");
-    return false;
-  }
-
-  return true;
+  Serial.println("");
+  Serial.print("Handle topic: '");
+  Serial.print(p_topic);
+  Serial.print("' with payload: '");
+  Serial.print(payload);
+  Serial.println("'");
 }
 
 void sendAlive() {
@@ -240,13 +226,14 @@ void reconnect() {
 }
 
 bool connectToPrimary() {
+  pubSubClient.setServer(MQTT_SERVER_IP, MQTT_SERVER_PORT);
+  
   Serial.print("Attempting primary MQTT connection to ");
   Serial.print(String(MQTT_SERVER_IP));
   Serial.print(":");
   Serial.print(String(MQTT_SERVER_PORT));
   Serial.println(" ... ");
-
-  pubSubClient.setServer(MQTT_SERVER_IP, MQTT_SERVER_PORT);
+  
   return doConnect();
 }
 
@@ -265,9 +252,9 @@ bool connectToSecondary() {
 bool doConnect() {
   bool isConnected = pubSubClient.connect(SENSORNAME.c_str(), MQTT_USER, MQTT_PASSWORD);
   if (isConnected == true) {
-    Serial.println("connected");    
+    Serial.println("Connected");    
   } else {
-    Serial.println("ERROR: failed, rc=" + pubSubClient.state());
+    Serial.println("Not connected");    
     printState();
   }
   
@@ -403,5 +390,20 @@ void publishIp() {
   } else {
     Serial.println("Could not publish IP.");
   }
+}
+
+void sendLog() {
+  String message = "test log message";
+    bool publishedLog = pubSubClient.publish(LOGS_TOPIC, message.c_str(), false);
+  if (publishedLog == true) {
+    Serial.println("Published log message");
+  } else {
+    Serial.println("Could not publish log message.");
+  }
+}
+
+void resetToFactoryDefaults() {
+  WiFi.disconnect();
+  delay(3000);
 }
 
