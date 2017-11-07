@@ -1,67 +1,74 @@
 #include <ESP8266WiFi.h>
-#include <DHT.h>
-#include <PubSubClient.h>
-#include <ESP8266mDNS.h>
-#include <WiFiUdp.h>
+#include <WiFiClient.h>
+#include <DNSServer.h>
 #include <WiFiManager.h>
+#include <PubSubClient.h>
 #include <ArduinoOTA.h>
 #include <ArduinoJson.h>
 #include "Timer.h"
 #include "Config.h"
+#include <DHT.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <Adafruit_Sensor.h>
+//#include <Adafruit_Sensor.h>
 #include <Adafruit_BMP280.h>
 
-Timer t;
+const String SENSORNAME = "multisensor-berlin-bad";
+const PROGMEM char* IP_TOPIC =     "home-assistant/sensors/10/ip";
+const PROGMEM char* LOGS_TOPIC =   "home-assistant/sensors/10/logs";
+const PROGMEM char* STATE_TOPIC =  "home-assistant/sensors/10/state";
+const PROGMEM char* HEALTH_TOPIC = "home-assistant/sensors/10/health";
 
+#define LDRPIN    A0
+#define PIRPIN    D8
+#define DHTPIN    D7
+#define DHTTYPE   DHT22
+
+//test to remove those when it worked initially
 #define BMP_SCK 13
 #define BMP_MISO 12
 #define BMP_MOSI 11 
 #define BMP_CS 10
 
+WiFiClient wifiClient;
+PubSubClient pubSubClient(wifiClient);
+Timer t;
 Adafruit_BMP280 bmp; // I2C
+DHT dht(DHTPIN, DHTTYPE);
 
-const String SENSORNAME = "sensor-1000";
-const PROGMEM char* IP_TOPIC =     "home-assistant/sensors/1/ip";
-const PROGMEM char* LOGS_TOPIC =   "home-assistant/sensors/1/logs";
-const PROGMEM char* STATE_TOPIC =  "home-assistant/sensors/1/state";
-const PROGMEM char* HEALTH_TOPIC = "home-assistant/sensors/1/health";
-
-#define PIRPIN    D2
-#define DHTPIN    D7
-#define DHTTYPE   DHT22
-#define LDRPIN    A0
+boolean hasPir = false;
+boolean hasLdr = true;
+boolean hasBmp = true;
+boolean hasDht = false;
 
 bool initial = true;
 int ldr;
 float diffLdr = 25;
 
 float diffTemperature = 0.1;
-float temperatureDHT;
-float temperatureBMP;
-float temperatureAvg;
+float temperatureDHT = 0.0;
+float temperatureBMP = 0.0;
+float temperatureAvg = 0.0;
 
 float diffHumidity = 1;
-float humidity;
+float humidity = 0.0;
 
 float diffPressure = 20;
-float pressure;
+float pressure = 0.0;
 
 float diffAltitude = 1;
-float altitude;
+float altitude = 0.0;
 
 int pirValue;
 int pirStatus;
-String motionStatus;
+String motionStatus = "standby";
 
-char message_buff[100];
-const int BUFFER_SIZE = 300;
-#define MQTT_MAX_PACKET_SIZE 512
+const int BUFFER_SIZE = 222;
 
-WiFiClient espClient;
-PubSubClient pubSubClient(espClient);
-DHT dht(DHTPIN, DHTTYPE);
+const PROGMEM char* NIGHT_MODE_TOPIC = "home-assistant/nightmode";
+const PROGMEM char* DEBUG_MODE_TOPIC = "home-assistant/debug";
+const PROGMEM char* PANIC_TOPIC = "home-assistant/panic";
+const PROGMEM char* BLINDS_RESET_TOPIC = "home-assistant/blinds/reset";
 
 void setup() {
   Serial.begin(115200);
@@ -76,22 +83,31 @@ void setup() {
 }
 
 void setupPins() {
-  /*
-  Wire.begin(D3,D4); 
-  if (!bmp.begin()) {  
-    Serial.println("Could not find a valid BMP280 sensor, check wiring!");
-    while (1);
+  if (hasPir) {
+    pinMode(PIRPIN, INPUT);  
   }
-  */
 
-  pinMode(PIRPIN, INPUT);
-  pinMode(DHTPIN, INPUT);
-  //pinMode(LDRPIN, INPUT);
+  if (hasDht) {
+    pinMode(DHTPIN, INPUT);  
+  }
+
+  if (hasLdr) {
+    pinMode(LDRPIN, INPUT);
+  }
+
+  if (hasBmp) {
+    Wire.begin(D3,D4); 
+    if (!bmp.begin()) {  
+      Serial.println("Could not find a valid BMP280 sensor, check wiring!");
+      while (1);
+    }
+  }
 }
 
 void setupWifi() {
+  delay(10);
   WiFiManager wifiManager;
-  wifiManager.setTimeout(180);
+  wifiManager.setTimeout(300);
 
   //resetToFactoryDefaults();
 
@@ -139,11 +155,11 @@ void setupMqtt() {
 
 void setupTimer() {
   t.every(100, checkMotion);
-  t.every(10000, checkSensors);
-  t.every(60000, sendLog); // every 1 minute
-  t.every(600000, sendState); // every 1 minute
-  t.every(10000, sendAlive); // every 10 seconds
-  t.every(120000, publishIp); // every 2 minutes
+  t.every(1000, checkSensors);
+  t.every(600000, sendSensorState); //every 10 minutes
+  
+  t.every(10000, sendAlive);
+  t.every(60000, publishIp);
 }
 
 void callback(char* p_topic, byte* p_payload, unsigned int p_length) {
@@ -162,7 +178,7 @@ void callback(char* p_topic, byte* p_payload, unsigned int p_length) {
 }
 
 void sendAlive() {
-  bool sent = pubSubClient.publish(HEALTH_TOPIC, "alive", true);
+  bool sent = pubSubClient.publish(HEALTH_TOPIC, "alive", false);
   if (sent == true) {
     Serial.println("Successfully sent alive.");
   } else {
@@ -170,7 +186,7 @@ void sendAlive() {
   }
 }
 
-void sendState() {
+void sendSensorState() {
   if (temperatureDHT != 0 && temperatureBMP != 0) {
     temperatureAvg = (temperatureDHT + temperatureBMP) / 2;  
   } else if (temperatureDHT == 0 && temperatureBMP != 0) {
@@ -195,29 +211,46 @@ void sendState() {
 
   JsonObject& root = jsonBuffer.createObject();
   root["temperature"] = (String)temperatureAvg;
-  root["temperature_dht"] = (String)temperatureDHT;
-  root["temperature_bmp"] = (String)temperatureBMP;
-  root["humidity"] = (String)humidity;
-  root["brightness"] = (String)brightness;
-  root["pressure"] = (String)correctedPressure;
-  root["altitude"] = (String)altitude;
-  
-  root["motion"] = (String)motionStatus;
+  if (hasPir) {
+    root["motion"] = (String)motionStatus;
+  }
 
+  if (hasBmp) {
+    root["temperature_bmp"] = (String)temperatureBMP;
+    root["pressure"] = (String)correctedPressure;
+    root["altitude"] = (String)altitude;
+  }
+
+  if (hasDht) {
+    root["temperature_dht"] = (String)temperatureDHT;  
+    root["humidity"] = (String)humidity;  
+  }
+
+  if (hasLdr) {
+    root["brightness"] = (String)brightness;  
+  }
+  
   char buffer[root.measureLength() + 1];
   root.printTo(buffer, sizeof(buffer));
 
   Serial.println(buffer);
-  pubSubClient.publish(STATE_TOPIC, buffer, true);
+  bool publishedState = pubSubClient.publish(STATE_TOPIC, buffer, false);
+  if (publishedState == true) {
+    Serial.println("Successfully sent sensor states.");
+  } else {
+    Serial.println("Failed to send sensor states.");
+  }
 }
 
 void reconnect() {
   while (!pubSubClient.connected()) {
     printState();
-    if (connectToPrimary()) {
-      return;
+    if (connectToPrimary(false)) {
+      subscribeToTopics();
+    } else if (connectToPrimary(true)) {
+      subscribeToTopics();
     } else if (connectToSecondary()) {
-      return;
+      subscribeToTopics();
     } else {
       Serial.println("DEBUG: try again in 5 seconds");
       delay(5000);
@@ -225,39 +258,34 @@ void reconnect() {
   }
 }
 
-bool connectToPrimary() {
-  pubSubClient.setServer(MQTT_SERVER_IP, MQTT_SERVER_PORT);
-  
+bool connectToPrimary(boolean fallbackPort) {
+  uint16_t port = (fallbackPort == true) ? MQTT_SERVER_FALLBACK_PORT : MQTT_SERVER_PORT;
+
   Serial.print("Attempting primary MQTT connection to ");
-  Serial.print(String(MQTT_SERVER_IP));
-  Serial.print(":");
-  Serial.print(String(MQTT_SERVER_PORT));
-  Serial.println(" ... ");
-  
-  return doConnect();
+  return doConnect(MQTT_SERVER_IP, port);
 }
 
 bool connectToSecondary() {
-  pubSubClient.setServer(MQTT_FALLBACK_SERVER_IP, MQTT_FALLBACK_SERVER_PORT);
-  
   Serial.print("Attempting secondary MQTT connection to ");
-  Serial.print(String(MQTT_FALLBACK_SERVER_IP));
-  Serial.print(":");
-  Serial.print(String(MQTT_FALLBACK_SERVER_PORT));
-  Serial.println(" ... ");
-
-  return doConnect();
+  return doConnect(MQTT_FALLBACK_SERVER_IP, MQTT_FALLBACK_SERVER_PORT);
 }
 
-bool doConnect() {
+bool doConnect(const char* ip, uint16_t port) {
+  Serial.print(ip);
+  Serial.print(":");
+  Serial.print((String) port);
+  Serial.println(" ... ");
+
+  pubSubClient.setServer(ip, port);
+  
   bool isConnected = pubSubClient.connect(SENSORNAME.c_str(), MQTT_USER, MQTT_PASSWORD);
   if (isConnected == true) {
-    Serial.println("Connected");    
+    Serial.println("connected");
   } else {
-    Serial.println("Not connected");    
+    Serial.println("ERROR: failed, rc=" + pubSubClient.state());
     printState();
   }
-  
+
   return isConnected;
 }
 
@@ -266,34 +294,48 @@ bool printState() {
     case -4:
       Serial.println("Server didn't respond within the keepalive time");
       break;
-    case -3: 
+    case -3:
       Serial.println("Network connection was broken");
       break;
-    case -2: 
+    case -2:
       Serial.println("Network connection failed");
       break;
-    case -1: 
+    case -1:
       Serial.println("Client is disconnected cleanly");
       break;
-    case 0: 
+    case 0:
       Serial.println("Cient is connected");
       break;
-    case 1: 
+    case 1:
       Serial.println("Server doesn't support the requested version of MQTT");
       break;
-    case 2: 
+    case 2:
       Serial.println("Server rejected the client identifier");
       break;
-    case 3: 
+    case 3:
       Serial.println("Server was unable to accept the connection");
       break;
-    case 4: 
+    case 4:
       Serial.println("username/password were rejected");
       break;
-    case 5: 
+    case 5:
       Serial.println("Client was not authorized to connect");
       break;
   }
+}
+
+void subscribeToTopics() {
+  Serial.println("Subscribe to " + String(PANIC_TOPIC));
+  pubSubClient.subscribe(PANIC_TOPIC);
+  pubSubClient.loop();
+
+  Serial.println("Subscribe to " + String(NIGHT_MODE_TOPIC));
+  pubSubClient.subscribe(NIGHT_MODE_TOPIC);
+  pubSubClient.loop();
+
+  Serial.println("Subscribe to " + String(DEBUG_MODE_TOPIC));
+  pubSubClient.subscribe(DEBUG_MODE_TOPIC);
+  pubSubClient.loop();
 }
 
 bool checkBoundSensor(float newValue, float prevValue, float maxDiff) {
@@ -302,7 +344,10 @@ bool checkBoundSensor(float newValue, float prevValue, float maxDiff) {
 
 void loop() {
   reconnect();
+  pubSubClient.loop();
+  
   ArduinoOTA.handle();
+  
   t.update();
   
   if (initial == true) {
@@ -312,15 +357,19 @@ void loop() {
 }
 
 void checkMotion() {
+  if (!hasPir) {
+    return;
+  }
+  
   pirValue = digitalRead(PIRPIN);
 
   if (pirValue == LOW && pirStatus != 1) {
     motionStatus = "standby";
-    sendState();
+    sendSensorState();
     pirStatus = 1;
   } else if (pirValue == HIGH && pirStatus != 2) {
     motionStatus = "action";
-    sendState();
+    sendSensorState();
     pirStatus = 2;
   }
 }
@@ -328,49 +377,50 @@ void checkMotion() {
 void checkSensors() {
   bool hasChanges = false;
 
-  /*
-
-  float pressureNew = bmp.readPressure();
-  if (checkBoundSensor(pressureNew, pressure, diffPressure)) {
-    pressure = pressureNew;
-    hasChanges = true;
-  }
-
-  float altitudeNew = bmp.readAltitude(1021);
-  if (checkBoundSensor(altitudeNew, altitude, diffAltitude)) {
-    altitude = altitudeNew;
-    hasChanges = true;
+  if (hasBmp) {
+    float pressureNew = bmp.readPressure();
+    if (checkBoundSensor(pressureNew, pressure, diffPressure)) {
+      pressure = pressureNew;
+      hasChanges = true;
+    }
+  
+    float altitudeNew = bmp.readAltitude(1021);
+    if (checkBoundSensor(altitudeNew, altitude, diffAltitude)) {
+      altitude = altitudeNew;
+      hasChanges = true;
+    }  
+    
+    float temperatureBMPNew = bmp.readTemperature();
+    if (checkBoundSensor(temperatureBMPNew, temperatureBMP, diffTemperature)) {
+      temperatureBMP = temperatureBMPNew;
+      hasChanges = true;
+    }
   }
   
-  float temperatureBMPNew = bmp.readTemperature();
-  if (checkBoundSensor(temperatureBMPNew, temperatureBMP, diffTemperature)) {
-    temperatureBMP = temperatureBMPNew;
-    hasChanges = true;
-  }
-  */
-
-  float temperatureDHTNew = dht.readTemperature(); //to use celsius remove the true text inside the parentheses  
-  if (checkBoundSensor(temperatureDHTNew, temperatureDHT, diffTemperature)) {
-    temperatureDHT = temperatureDHTNew;
-    hasChanges = true;
-  }
-
-  float humidityNew = dht.readHumidity();
-  if (checkBoundSensor(humidityNew, humidity, diffHumidity)) {
-    humidity = humidityNew;
-    hasChanges = true;
+  if (hasDht) {
+    float temperatureDHTNew = dht.readTemperature(); //to use celsius remove the true text inside the parentheses  
+    if (checkBoundSensor(temperatureDHTNew, temperatureDHT, diffTemperature)) {
+      temperatureDHT = temperatureDHTNew;
+      hasChanges = true;
+    }
+  
+    float humidityNew = dht.readHumidity();
+    if (checkBoundSensor(humidityNew, humidity, diffHumidity)) {
+      humidity = humidityNew;
+      hasChanges = true;
+    }  
   }
 
-/*
-  int ldrNew = analogRead(LDRPIN);
-  if (checkBoundSensor(ldrNew, ldr, diffLdr)) {
-    ldr = ldrNew;
-    hasChanges = true;
+  if (hasLdr) {
+    int ldrNew = analogRead(LDRPIN);
+    if (checkBoundSensor(ldrNew, ldr, diffLdr)) {
+      ldr = ldrNew;
+      hasChanges = true;
+    }  
   }
-  */
 
   if (hasChanges == true) {
-    sendState();
+    sendSensorState();
   }
 }
 
@@ -392,17 +442,8 @@ void publishIp() {
   }
 }
 
-void sendLog() {
-  String message = "test log message";
-    bool publishedLog = pubSubClient.publish(LOGS_TOPIC, message.c_str(), false);
-  if (publishedLog == true) {
-    Serial.println("Published log message");
-  } else {
-    Serial.println("Could not publish log message.");
-  }
-}
-
 void resetToFactoryDefaults() {
+  Serial.println("Reset to factory defaults");
   WiFi.disconnect();
   delay(3000);
 }
